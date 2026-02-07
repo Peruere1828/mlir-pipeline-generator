@@ -2,7 +2,7 @@ import re
 import os
 from typing import Set, List, Dict, Tuple
 from config import OFFICIAL_DIALECT_NAMESPACES
-from definition import Operation
+from definition import Operation, MLIRType
 from collections import defaultdict
 
 class MLIRParser:
@@ -24,37 +24,41 @@ class MLIRParser:
                 cleaned_lines.append(line)
         return '\n'.join(cleaned_lines)
 
-    def parse_content(self, content: str) -> Dict[str, Set[Operation]]:
-        """
-        解析 MLIR 内容。
-        
-        Returns:
-            Dict[str, Set[Operation]]: 
-            Key 是 dialect 名称 (如 'linalg'), 
-            Value 是该 Dialect 下出现的所有 Operation 对象集合。
-        """
+    def parse_content(self, content: str) -> Dict[str, object]:
         cleaned_content = self._remove_comments(content)
         
-        # 使用 defaultdict 简化字典初始化逻辑
-        result = defaultdict(set)
-
-        # 正则保持不变
-        pattern = re.compile(r'\b([\w_]+)\.([\w_]+)\b')
-        matches = pattern.findall(cleaned_content)
-
-        for dialect, op_name in matches:
-            # 1. 白名单过滤
+        # 1. Parse Ops (保持不变)
+        found_ops_dict = defaultdict(set)
+        op_pattern = re.compile(r'\b([\w_]+)\.([\w_]+)\b')
+        op_matches = op_pattern.findall(cleaned_content)
+        for dialect, op_name in op_matches:
             if dialect in self.whitelist:
-                # 2. 创建 Operation 对象
                 op = Operation(dialect=dialect, name=op_name)
-                
-                # 3. 存入结果 (由于是 set，自动去重)
-                result[dialect].add(op)
+                found_ops_dict[dialect].add(op)
 
-        # 转换为普通 dict 返回 (可选，看个人喜好)
-        return dict(result)
+        # 2. Parse Types [新增]
+        # 简单的启发式搜索：查找 builtin 容器类型关键字
+        # 匹配 pattern: tensor<, memref<, vector<
+        found_types = set()
+        type_keywords = ['tensor', 'memref', 'vector']
+        
+        for kw in type_keywords:
+            # 搜索 "tensor<" 这种模式
+            if re.search(rf'\b{kw}\s*<', cleaned_content):
+                found_types.add(MLIRType(kw))
 
-    def parse_file(self, file_path: str) -> Dict[str, Set[Operation]]:
+        # 3. 整合返回
+        # 扁平化 Ops 集合
+        all_ops = set()
+        for ops in found_ops_dict.values():
+            all_ops.update(ops)
+
+        return {
+            "ops": all_ops,
+            "types": found_types
+        }
+
+    def parse_file(self, file_path: str) -> Dict[str, object]:
         """
         读取文件并解析
         """
@@ -65,33 +69,3 @@ class MLIRParser:
             content = f.read()
             
         return self.parse_content(content)
-
-# ==============================================================================
-# Usage Example
-# ==============================================================================
-if __name__ == "__main__":
-    # 模拟输入：包含重复的 linalg.generic 和不同的 arith op
-    code = """
-    func.func @test() {
-        %0 = arith.constant 1 : i32
-        %1 = arith.constant 2 : i32  // 重复的 arith.constant
-        %2 = linalg.generic ...      // 第一次出现
-        %3 = linalg.generic ...      // 第二次出现 (应该被去重)
-        %4 = linalg.matmul ...       // 新的 linalg op
-    }
-    """
-    
-    parser = MLIRParser()
-    parsed_data = parser.parse_content(code)
-    
-    print("=== Parsed Result ===")
-    for dialect, ops in parsed_data.items():
-        print(f"Dialect: [{dialect}]")
-        for op in ops:
-            # 这里调用的是 Operation.__repr__
-            print(f"  └── {op} (Name: {op.name})")
-            
-    # 验证去重逻辑
-    linalg_ops = parsed_data['linalg']
-    print(f"\nTotal Linalg Ops Detected: {len(linalg_ops)}") 
-    # 应该输出 2 (generic 和 matmul)，尽管 generic 在代码里出现了两次

@@ -1,7 +1,7 @@
 import heapq
 from typing import List, Set, Optional, FrozenSet
 # 导入你在 definition.py 中定义的类
-from definition import Operation, CompilationTarget, MLIRPass
+from definition import MLIRType, Operation, CompilationTarget, MLIRPass
 from mlir_parser import MLIRParser
 
 # ==============================================================================
@@ -13,17 +13,18 @@ class CompilationState:
     [The Snapshot] 搜索树的一个节点。
     表示当前代码中包含的 Operation 集合。
     """
-    def __init__(self, ops: Set[Operation]):
+    def __init__(self, ops: Set[Operation], types: Set[MLIRType]):
         # 使用 frozenset 确保状态是不可变且可哈希的
         self.ops: FrozenSet[Operation] = frozenset(ops)
+        self.types: FrozenSet[MLIRType] = frozenset(types)
 
     def __hash__(self):
-        return hash(self.ops)
+        return hash((self.ops, self.types))
 
     def __eq__(self, other):
         if not isinstance(other, CompilationState):
             return False
-        return self.ops == other.ops
+        return self.ops == other.ops and self.types == other.types
 
     def __lt__(self, other):
         # 仅用于优先队列打破平局，逻辑不重要，保证确定性即可
@@ -31,20 +32,19 @@ class CompilationState:
         return len(self.ops) < len(other.ops)
 
     def __repr__(self):
-        # 简单的字符串表示，方便调试
-        op_strs = [op.full_name for op in self.ops]
-        return f"State({sorted(op_strs)})"
+        return f"State(Ops={len(self.ops)}, Types={list(self.types)})"
 
-    def get_illegal_ops(self, target: CompilationTarget) -> List[Operation]:
+    def get_illegal_items(self, target: CompilationTarget) -> int:
         """
-        根据 Target 的定义，找出当前状态中所有非法的 Op。
+        根据 Target 的定义，计算 heuristic 的代价 (Ops + Types)
         这是计算启发函数 h(n) 的基础。
         """
-        return [op for op in self.ops if not target.is_legal(op)]
+        ill_ops = [op for op in self.ops if not target.is_legal_op(op)]
+        ill_types = [t for t in self.types if not target.is_legal_type(t)] # [新增]
+        return len(ill_ops) + len(ill_types)
 
     def is_solved(self, target: CompilationTarget) -> bool:
-        """检查是否达成目标（即没有 Illegal Ops）"""
-        return len(self.get_illegal_ops(target)) == 0
+        return self.get_illegal_items(target) == 0
 
 
 # ==============================================================================
@@ -68,38 +68,36 @@ class KnowledgeBase:
         """
         # 优化策略：我们只应该尝试那些能处理当前 "Illegal Ops" 的 Pass。
         # 如果一个 Pass 的输入全是合法的 Op，通常没必要跑它（除非是优化 Pass，目前暂不考虑）。
-        return [p for p in self.passes if p.is_applicable(state.ops)]
+        return [p for p in self.passes if p.is_applicable(state.ops, state.types)]
 
     def apply_pass(self, state: CompilationState, p: MLIRPass) -> CompilationState:
-        """
-        [Core Logic] 模拟 Pass 执行后的状态变化。
-        New State = (Old State - Handled Ops) + Generated Ops
-        """
+        # 1. Update Ops
         current_ops = set(state.ops)
         new_ops = set()
-        
-        # 1. 移除被此 Pass 处理掉的 Ops
         for op in current_ops:
             handled = False
-            
-            # 检查: 该 Pass 是否声明处理整个 Dialect
-            if op.dialect in p.src_dialects:
+            if op.dialect in p.src_dialects or op in p.src_ops:
                 handled = True
-            # 检查: 该 Pass 是否声明处理特定 Op
-            elif op in p.src_ops:
-                handled = True
-            
             if not handled:
-                new_ops.add(op) # 没被处理，保留
-        
-        # 2. 添加此 Pass 产生的新 Ops
-        # 注意：definition.py 中 MLIRPass 也有 tgt_dialects。
-        # 但 State 需要具体的 Operation 对象。在 Mock/Search 阶段，
-        # 我们主要依赖 pass.tgt_ops 来模拟产生的新操作。
+                new_ops.add(op)
         for gen_op in p.tgt_ops:
             new_ops.add(gen_op)
-            
-        return CompilationState(new_ops)
+
+        # 2. Update Types [新增]
+        current_types = set(state.types)
+        new_types = set()
+        
+        # 逻辑：如果 Pass 声明处理某种 Type (如 tensor)，我们假设它把所有 tensor 都转化了
+        # (对于 Global Pass 如 bufferization 成立)
+        for t in current_types:
+            if t not in p.src_types:
+                new_types.add(t)
+        
+        # 添加引入的新 Type
+        for t in p.tgt_types:
+            new_types.add(t)
+
+        return CompilationState(new_ops, new_types)
 
 
 # ==============================================================================
@@ -113,12 +111,11 @@ class PipelineSearcher:
     def heuristic(self, state: CompilationState, target: CompilationTarget) -> float:
         """
         h(n): 估算距离目标的代价。
-        策略：剩余 Illegal Op 的数量。
+        策略：剩余 Illegal Op + Illegal Types 的数量。
         """
-        illegal_ops = state.get_illegal_ops(target)
-        return float(len(illegal_ops))
+        return float(state.get_illegal_items(target))
 
-    def search(self, start_ops: Set[Operation], target: CompilationTarget) -> Optional[List[str]]:
+    def search(self, start_ops: Set[Operation], start_types: Set[MLIRType], target: CompilationTarget) -> Optional[List[str]]:
         """
         执行 A* 搜索。
         Args:
@@ -127,7 +124,7 @@ class PipelineSearcher:
         Returns:
             List[str]: 找到的 Pass Pipeline (Pass 名称列表) 或 None
         """
-        start_state = CompilationState(start_ops)
+        start_state = CompilationState(start_ops, start_types)
         
         # 初始启发值
         start_h = self.heuristic(start_state, target)
@@ -139,7 +136,7 @@ class PipelineSearcher:
         visited = set()
         visited.add(start_state)
 
-        print(f"🔎 [Solver] Start Search.")
+        print(f"[Solver] Start Search.")
         print(f"   Initial State: {start_state}")
         print(f"   Target Constraints: {target}")
 
@@ -150,7 +147,7 @@ class PipelineSearcher:
 
             # 1. 检查是否达成目标
             if current_state.is_solved(target):
-                print(f"✅ [Solver] Solution Found in {steps} steps! Cost: {g}")
+                print(f"[Solver] Solution Found in {steps} steps! Cost: {g}")
                 print(f"   Final State: {current_state}")
                 return [p.name for p in path]
 
@@ -174,7 +171,7 @@ class PipelineSearcher:
                 visited.add(next_state)
                 heapq.heappush(queue, (new_f, new_g, next_state, new_path))
         
-        print("❌ [Solver] Exhausted search space. No solution found.")
+        print("[Solver] Exhausted search space. No solution found.")
         return None
 
 
@@ -182,130 +179,41 @@ class PipelineSearcher:
 # 4. Mock 测试 (演示如何使用上述类)
 # ==============================================================================
 
-def test_integration_with_parser():
-    """
-    测试 1: 集成 MLIRParser，演示从文本到 Pipeline 的全过程。
-    """
-    print("\n=== Test 1: Integration with MLIRParser ===")
-    
-    # 模拟一段 MLIR 代码
-    mlir_code = """
-func.func private @callee(%arg0: memref<f32>) -> memref<f32> {
-  %2 = arith.constant 2.0 : f32
-  memref.load %arg0[] {tag = "call_and_store_before::enter_callee"} : memref<f32>
-  memref.store %2, %arg0[] {tag_name = "callee"} : memref<f32>
-  memref.load %arg0[] {tag = "exit_callee"} : memref<f32>
-  return %arg0 : memref<f32>
-}
-    """
-    
-    # 1. 解析
-    parser = MLIRParser()
-    parsed_dict = parser.parse_content(mlir_code)
-    
-    # 2. 扁平化: Dict[str, Set[Op]] -> Set[Op]
-    start_ops = set()
-    for ops in parsed_dict.values():
-        start_ops.update(ops)
-    
-    # 3. 设置目标 (Target)
-    target = CompilationTarget()
-    # 标记非 LLVM 为 Illegal (简化版逻辑)
-    target.mark_dialect_illegal("func")
-    target.mark_dialect_illegal("arith")
-    target.mark_dialect_illegal("linalg")
-    target.mark_dialect_illegal("scf")
-    # target.mark_dialect_legal("llvm") # 默认其它如果没标记为 illegal，且不在 legal 列表... 
-    # (依赖 CompilationTarget 具体的 is_legal 实现逻辑，这里假设未标记 Illegal 且没 Legal Set 限制时会有问题，
-    # 建议配合 definition.py 里的逻辑：只要 dialect 在 illegal_dialects 里就是非法)
-
-    # 4. 构建 KB (模拟 Full Conversion)
-    kb = KnowledgeBase()
-    
-    p1 = MLIRPass("convert-linalg-to-loops")
-    p1.add_source("linalg") # 处理所有 linalg
-    p1.add_target(Operation("scf", "for"))
-    kb.register_pass(p1)
-
-    p2 = MLIRPass("convert-scf-to-cf")
-    p2.add_source("scf")
-    p2.add_target(Operation("cf", "br"))
-    kb.register_pass(p2)
-
-    p3 = MLIRPass("arith-to-llvm")
-    p3.add_source("arith")
-    p3.add_target(Operation("llvm", "add"))
-    kb.register_pass(p3)
-
-    p4 = MLIRPass("convert-cf-to-llvm")
-    p4.add_source("cf")
-    p4.add_target(Operation("llvm", "br"))
-    kb.register_pass(p4)
-    
-    p5 = MLIRPass("func-to-llvm")
-    p5.add_source("func")
-    p5.add_target(Operation("llvm", "func"))
-    kb.register_pass(p5)
-
-    # 5. 搜索
-    searcher = PipelineSearcher(kb)
-    pipeline = searcher.search(start_ops, target)
-    if pipeline:
-        print("Pipeline:", " -> ".join(pipeline))
-
-
-def test_partial_conversion():
-    """
-    测试 2: 演示 Partial Conversion (部分转换)。
-    场景：Vector Dialect。
-    - Pass A 只处理 vector.transfer_read
-    - Pass B 只处理 vector.transpose
-    """
-    print("\n=== Test 2: Partial Conversion (Vector Dialect) ===")
-
-    # 1. 初始 Ops: 包含 vector.transfer_read 和 vector.transpose
-    start_ops = {
-        Operation("vector", "transfer_read"),
-        Operation("vector", "transpose"),
-        Operation("func", "return")
-    }
-
-    # 2. 目标
-    target = CompilationTarget()
-    target.mark_dialect_illegal("vector") # 整个 vector 都不想要
-    
-    # 3. 构建 KB
-    kb = KnowledgeBase()
-
-    # Pass A: 这是一个 Partial Pass
-    # 它只声明处理 vector.transfer_read，而不处理整个 vector dialect
-    p_transfer = MLIRPass("convert-vector-transfer-to-scf")
-    p_transfer.add_source(Operation("vector", "transfer_read")) 
-    p_transfer.add_target(Operation("scf", "for"))
-    kb.register_pass(p_transfer)
-
-    # Pass B: 这是另一个 Partial Pass
-    p_transpose = MLIRPass("vector-transpose-to-llvm") # 假设直接降级
-    p_transpose.add_source(Operation("vector", "transpose"))
-    p_transpose.add_target(Operation("llvm", "matrix_intrinsics")) # 模拟
-    kb.register_pass(p_transpose)
-
-    # 辅助 Pass
-    p_scf = MLIRPass("scf-to-cf")
-    p_scf.add_source("scf")
-    p_scf.add_target(Operation("cf", "br"))
-    kb.register_pass(p_scf)
-
-    # 4. 搜索
-    searcher = PipelineSearcher(kb)
-    pipeline = searcher.search(start_ops, target)
-    
-    if pipeline:
-        print("Pipeline:", " -> ".join(pipeline))
-        # 预期：算法必须同时选出 p_transfer 和 p_transpose 才能消除所有的 vector op
-    else:
-        print("Failed to find pipeline!")
-
 if __name__ == "__main__":
-    test_integration_with_parser()
-    test_partial_conversion()
+    # 1. Target: LLVM Dialect Only, No Tensors
+    target = CompilationTarget()
+    target.mark_dialect_illegal("arith")
+    target.mark_type_illegal("tensor")
+    target.mark_type_illegal("memref")
+
+    # 2. Ops & Types
+    start_ops = {Operation("arith", "constant")} # %0 = arith.constant ... : tensor<...>
+    start_types = {MLIRType("tensor")}
+
+    # 3. KB
+    kb = KnowledgeBase()
+
+    # Pass: Bufferization
+    # 它的作用是将 Tensor 类型转化为 MemRef 类型
+    p_buf = MLIRPass("one-shot-bufferize")
+    p_buf.add_source(MLIRType("tensor")) # 处理 tensor
+    p_buf.add_target(MLIRType("memref")) # 产生 memref
+    kb.register_pass(p_buf)
+
+    # Pass: Memref to LLVM
+    p_mem = MLIRPass("finalize-memref-to-llvm")
+    p_mem.add_source(MLIRType("memref")) # 处理 memref
+    # 它可能也会产生 llvm dialect 的 op，此处省略
+    kb.register_pass(p_mem)
+    
+    # Pass: Arith to LLVM
+    p_arith = MLIRPass("arith-to-llvm")
+    p_arith.add_source("arith")
+    kb.register_pass(p_arith)
+
+    # 4. Search
+    searcher = PipelineSearcher(kb)
+    pipeline = searcher.search(start_ops, start_types, target)
+
+    # 预期路径: one-shot-bufferize (消 tensor) -> finalize-memref-to-llvm (消 memref) -> arith-to-llvm (消 op)
+    print(" -> ".join(pipeline) if pipeline else "Fail")
