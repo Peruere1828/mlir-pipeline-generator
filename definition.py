@@ -1,4 +1,4 @@
-from typing import Optional, Set, Union
+from typing import Optional, Set, Union, Dict
 
 class MLIRType:
     def __init__(self, name: str):
@@ -19,10 +19,13 @@ class Operation:
     表示一个 MLIR Operation 类型。
     例如: 对于 'linalg.generic', dialect='linalg', name='generic'
     """
-    def __init__(self, dialect: str, name: str, attributes: Optional[dict] = None):
+    def __init__(self, dialect: str, name: str, 
+                 traits: Optional[Set[str]] = None,
+                 operand_types: Optional[Set[MLIRType]] = None):
         self.dialect = dialect
         self.name = name  # 仅保留后缀，例如 'matmul'
-        self.attributes = attributes if attributes else {} # 预留字段，暂时为空
+        self.traits = traits if traits else set()        
+        self.operand_types = operand_types if operand_types else set()
     
     @property
     def full_name(self) -> str:
@@ -30,22 +33,23 @@ class Operation:
         return f"{self.dialect}.{self.name}"
 
     def __repr__(self):
-        return f"<Op: {self.full_name}>"
+        types_str = ",".join(t.name for t in self.operand_types)
+        traits_str = f"[{','.join(self.traits)}]" if self.traits else ""
+        return f"<{self.full_name}{traits_str}({types_str})>"
 
     def __eq__(self, other):
-        """
-        定义相等性：如果 Dialect 和 Name 都相同，则认为是同一个 Op 类型。
-        忽略 attributes 的差异（因为我们只关心 Op 类型是否存在）。
-        """
+        """现在判断两个 Op 是否相同，要求dialect、opname、optypes相同"""
         if not isinstance(other, Operation):
             return False
-        return self.dialect == other.dialect and self.name == other.name
+        return (self.dialect == other.dialect and 
+                self.name == other.name and 
+                self.operand_types == other.operand_types)
 
     def __hash__(self):
         """
         实现 Hash，以便可以放入 Set 中去重。
         """
-        return hash((self.dialect, self.name))
+        return hash((self.dialect, self.name, frozenset(self.operand_types)))
     
 class CompilationTarget:
     """
@@ -107,7 +111,7 @@ class CompilationTarget:
         return type_obj not in self._illegal_types
 
     def __repr__(self):
-        return f"<Target: illegal_dialects={len(self._illegal_dialects)}, illegal_ops={len(self._illegal_ops)}>, illegal_types={len(self._illegal_types)}>"
+        return f"<Target: illegal_dialects={len(self._illegal_dialects)}, illegal_ops={len(self._illegal_ops)}, illegal_types={len(self._illegal_types)}>"
     
 class MLIRPass:
     """
@@ -118,17 +122,16 @@ class MLIRPass:
         self.name = name
         self.cost = cost
         
-        # 该 Pass 能够处理（消除）的来源
+        # 匹配条件 (Source)
         self.src_dialects: Set[str] = set()
-        self.src_ops: Set[Operation] = set()
-        
-        # 该 Pass 会引入（生成）的目标
+        self.src_traits: Set[str] = set()  # 新增：匹配特定 Trait
+        self.src_ops: Set[Operation] = set()  # 初始化缺失的 src_ops 集合
+        self.op_type_requirements: Dict[str, MLIRType] = {} # 新增：比如 {"linalg": MLIRType("memref")}
+        self.src_types: Set[MLIRType] = set() # 全局消除的类型
+
+        # 生成结果 (Target)
         self.tgt_dialects: Set[str] = set()
         self.tgt_ops: Set[Operation] = set()
-
-        # [新增] 该 Pass 能消除的类型 (例如 bufferize 消除 tensor)
-        self.src_types: Set[MLIRType] = set()
-        # [新增] 该 Pass 引入的类型 (例如 bufferize 引入 memref)
         self.tgt_types: Set[MLIRType] = set()
 
     def add_source(self, item: Union[str, Operation, MLIRType]):
@@ -150,21 +153,38 @@ class MLIRPass:
             self.tgt_types.add(item)
             
     def is_applicable(self, current_ops: Set[Operation], current_types: Set[MLIRType]) -> bool:
+        """判断该 Pass 是否满足前置条件。
+        现在同时检查：
+        - 全局类型转换需求 (src_types)
+        - 明确声明要处理的具体 Op (src_ops)
+        - trait / dialect + 类型 组合匹配
         """
-        判断该 Pass 是否适用于当前的 Op 集合。
-        逻辑：如果 current_ops 里存在该 Pass 的 source (dialects 或 ops)，则适用。
-        """
+        # 0. 全局类型匹配：如果有 src_types 且当前 state 包含任一需要被转换的类型，则适用
+        if self.src_types and self.src_types.intersection(current_types):
+            return True
+
+        # 1. 逐 op 检查
         for op in current_ops:
-            # 检查 Dialect 匹配
-            if op.dialect in self.src_dialects:
-                return True
-            # 检查 Op 匹配
+            # 1.a 直接列举的 src_ops
             if op in self.src_ops:
                 return True
-            
-        for t in current_types:
-            if t in self.src_types:
-                return True
+
+            # 1.b Trait + Type 匹配
+            if self.src_traits.intersection(op.traits):
+                if "trait_target" in self.op_type_requirements:
+                    if self.op_type_requirements["trait_target"] in op.operand_types:
+                        return True
+                else:
+                    return True
+
+            # 1.c Dialect + Type 匹配
+            if op.dialect in self.src_dialects:
+                if op.dialect in self.op_type_requirements:
+                    if self.op_type_requirements[op.dialect] in op.operand_types:
+                        return True
+                else:
+                    return True
+
         return False
 
     def __repr__(self):
