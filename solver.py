@@ -25,7 +25,7 @@ if __name__ == "__main__":
 
     # 目标限制: 只允许 LLVM
     target = CompilationTarget()
-    for d in ["arith", "linalg", "scf", "affine", "cf", "func"]:
+    for d in ["arith", "linalg", "scf", "affine", "cf", "func", "tosa"]:
         target.mark_dialect_illegal(d)
     target.mark_type_illegal("tensor")
     target.mark_type_illegal("memref")

@@ -1,4 +1,4 @@
-from typing import Optional, Set, Union, Dict
+from typing import Optional, Set, Union, Dict, List, Callable
 
 class MLIRType:
     def __init__(self, name: str):
@@ -113,78 +113,81 @@ class CompilationTarget:
     def __repr__(self):
         return f"<Target: illegal_dialects={len(self._illegal_dialects)}, illegal_ops={len(self._illegal_ops)}, illegal_types={len(self._illegal_types)}>"
     
+class RewritePattern:
+    """
+    表示一个从 opA 到 opB 的转换规则。
+    """
+    def __init__(self, 
+                 src_dialect: str, 
+                 src_name: Optional[str] = None,   # 若为 None，则充当通配符，匹配该 Dialect 下所有 Op
+                 tgt_dialect: Optional[str] = None,# 若为 None，代表消除该 Op
+                 tgt_name: Optional[str] = None,   # 若为 None，则继承 src_op 的 name
+                 # 【修改这里】：在 Callable 签名中增加一个 Set['Operation']，用于接收 current_ops
+                 condition: Optional[Callable[['Operation', Set['Operation'], Set['MLIRType']], bool]] = None):
+        
+        self.src_dialect = src_dialect
+        self.src_name = src_name
+        self.tgt_dialect = tgt_dialect
+        self.tgt_name = tgt_name
+        self.condition = condition
+
+    def match(self, op: 'Operation', current_ops: Set['Operation'], current_types: Set['MLIRType']) -> bool:
+        if op.dialect != self.src_dialect: 
+            return False
+        if self.src_name and op.name != self.src_name: 
+            return False
+        # 传入 current_ops 进行判断
+        if self.condition and not self.condition(op, current_ops, current_types): 
+            return False
+        return True
+
+    def apply(self, op: 'Operation') -> List['Operation']:
+        """应用转换：opA -> opB"""
+        if not self.tgt_dialect:
+            return [] # 消除该节点
+        
+        # 确定新 Op 的名字（如果目标没指定，则保留原名，比如 arith.add -> llvm.add）
+        new_name = self.tgt_name if self.tgt_name else op.name
+        
+        # 继承原有的 operand_types (类型替换将在 apply_pass 统一做)
+        new_op = Operation(self.tgt_dialect, new_name, op.traits, set(op.operand_types))
+        return [new_op]
+
+
 class MLIRPass:
     """
-    表示一个 Conversion Pass。
-    它定义了它能处理什么 (Source/Illegal) 以及它会生成什么 (Target/Legal)。
+    一个 Pass 本质上就是一组 Pattern 规则的集合，外加一些全局的类型转换策略。
     """
     def __init__(self, name: str, cost: float = 1.0):
         self.name = name
         self.cost = cost
         
-        # 匹配条件 (Source)
-        self.src_dialects: Set[str] = set()
-        self.src_traits: Set[str] = set()  # 新增：匹配特定 Trait
-        self.src_ops: Set[Operation] = set()  # 初始化缺失的 src_ops 集合
-        self.op_type_requirements: Dict[str, MLIRType] = {} # 新增：比如 {"linalg": MLIRType("memref")}
-        self.src_types: Set[MLIRType] = set() # 全局消除的类型
+        # 存放 opA -> opB 的规则集
+        self.patterns: List[RewritePattern] = []
+        
+        # 存放全局类型转换 (例如 bufferization 中的 tensor -> memref)
+        self.type_conversions: Dict[MLIRType, MLIRType] = {}
 
-        # 生成结果 (Target)
-        self.tgt_dialects: Set[str] = set()
-        self.tgt_ops: Set[Operation] = set()
-        self.tgt_types: Set[MLIRType] = set()
+    def add_pattern(self, pattern: RewritePattern):
+        self.patterns.append(pattern)
 
-    def add_source(self, item: Union[str, Operation, MLIRType]):
-        """定义该 Pass 能'消化'什么"""
-        if isinstance(item, str):
-            self.src_dialects.add(item)
-        elif isinstance(item, Operation):
-            self.src_ops.add(item)
-        elif isinstance(item, MLIRType):
-            self.src_types.add(item)
+    def add_type_conversion(self, src_type: Union[str, MLIRType], tgt_type: Union[str, MLIRType]):
+        if isinstance(src_type, str): src_type = MLIRType(src_type)
+        if isinstance(tgt_type, str): tgt_type = MLIRType(tgt_type)
+        self.type_conversions[src_type] = tgt_type
 
-    def add_target(self, item: Union[str, Operation, MLIRType]):
-        """定义该 Pass 能'生产'什么"""
-        if isinstance(item, str):
-            self.tgt_dialects.add(item)
-        elif isinstance(item, Operation):
-            self.tgt_ops.add(item)
-        elif isinstance(item, MLIRType):
-            self.tgt_types.add(item)
-            
-    def is_applicable(self, current_ops: Set[Operation], current_types: Set[MLIRType]) -> bool:
-        """判断该 Pass 是否满足前置条件。
-        现在同时检查：
-        - 全局类型转换需求 (src_types)
-        - 明确声明要处理的具体 Op (src_ops)
-        - trait / dialect + 类型 组合匹配
+    def is_applicable(self, ops: Set['Operation'], types: Set['MLIRType']) -> bool:
         """
-        # 0. 全局类型匹配：如果有 src_types 且当前 state 包含任一需要被转换的类型，则适用
-        if self.src_types and self.src_types.intersection(current_types):
-            return True
-
-        # 1. 逐 op 检查
-        for op in current_ops:
-            # 1.a 直接列举的 src_ops
-            if op in self.src_ops:
+        只要有任何一个全局类型需要被转换，或者有任何一个 Op 能命中规则，就可以应用该 Pass。
+        """
+        for src_t in self.type_conversions.keys():
+            if src_t in types:
                 return True
-
-            # 1.b Trait + Type 匹配
-            if self.src_traits.intersection(op.traits):
-                if "trait_target" in self.op_type_requirements:
-                    if self.op_type_requirements["trait_target"] in op.operand_types:
-                        return True
-                else:
+                
+        for op in ops:
+            for pattern in self.patterns:
+                if pattern.match(op, ops, types):
                     return True
-
-            # 1.c Dialect + Type 匹配
-            if op.dialect in self.src_dialects:
-                if op.dialect in self.op_type_requirements:
-                    if self.op_type_requirements[op.dialect] in op.operand_types:
-                        return True
-                else:
-                    return True
-
         return False
 
     def __repr__(self):

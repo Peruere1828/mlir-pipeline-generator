@@ -42,60 +42,42 @@ class KnowledgeBase:
         new_ops = set()
         new_types = set(state.types)
         
-        # 1. 更新全局 Types
-        for t in p.src_types:
-            if t in new_types: new_types.remove(t)
-        for t in p.tgt_types:
-            new_types.add(t)
-
-        # 2. 更新 Ops
+        # 1. 执行全局类型转换 (Type Conversion)
+        type_changed_map = {}
+        for src_t, tgt_t in p.type_conversions.items():
+            if src_t in new_types:
+                new_types.remove(src_t)
+                new_types.add(tgt_t)
+                type_changed_map[src_t] = tgt_t
+                
+        # 2. 对每个 Operation 进行 Pattern 匹配重写
         for op in state.ops:
-            handled = False
-            
-            # 判断该 Op 是否被作为 Source "吃掉" (Consumed)
-            if op.dialect in p.src_dialects:
-                if op.dialect in p.op_type_requirements:
-                    if p.op_type_requirements[op.dialect] in op.operand_types:
-                        handled = True
+            matched_pattern = None
+            # 找到第一个命中的规则
+            for pattern in p.patterns:
+                if pattern.match(op, state.ops, state.types):
+                    matched_pattern = pattern
+                    break
+                    
+            if matched_pattern:
+                # 规则触发：根据规则生成 opB
+                generated_ops = matched_pattern.apply(op)
+                for gen_op in generated_ops:
+                    # 如果刚才发生了类型转换，需要把生成的 Op 的类型也同步更新
+                    # 例如把 arith.add(tensor) 变成了 llvm.add(memref)
+                    if type_changed_map:
+                        updated_types = {type_changed_map.get(t, t) for t in gen_op.operand_types}
+                        gen_op.operand_types = updated_types
+                    new_ops.add(gen_op)
+            else:
+                # 没有规则触发该 Op，原样保留
+                # 但要注意：如果全局类型改变了，且该未被重写的 Op 使用了旧类型，我们需要给它换上新类型
+                if type_changed_map and any(t in type_changed_map for t in op.operand_types):
+                    updated_types = {type_changed_map.get(t, t) for t in op.operand_types}
+                    new_ops.add(Operation(op.dialect, op.name, op.traits, updated_types))
                 else:
-                    handled = True
-
-            if p.src_traits.intersection(op.traits):
-                if "trait_target" in p.op_type_requirements:
-                    if p.op_type_requirements["trait_target"] in op.operand_types:
-                        handled = True
-                else:
-                    handled = True
-
-            # Also consider explicit src_ops
-            if op in p.src_ops:
-                handled = True
-
-            if not handled:
-                # 如果没被吃掉，检查它的 Type 是否被转换了（比如 tensor -> memref）
-                current_op_types = set(op.operand_types)
-                changed = False
-                for st in p.src_types:
-                    if st in current_op_types:
-                        current_op_types.remove(st)
-                        changed = True
-                if changed:
-                    for tt in p.tgt_types:
-                        current_op_types.add(tt)
-                    # 生成 Type 被修改后的新 Op
-                    new_ops.add(Operation(op.dialect, op.name, op.traits, current_op_types))
-                else:
-                    # 原样保留
                     new_ops.add(op)
-
-        # 3. 添加 Pass 生成的新 Ops
-        for gen_op in p.tgt_ops:
-            new_ops.add(gen_op)
-            
-        # 简单模拟：如果 Pass 声明会生成某 dialect，粗略塞一个 generic op 进去代表状态
-        for gen_dialect in p.tgt_dialects:
-            new_ops.add(Operation(gen_dialect, "generic", operand_types=new_types))
-
+                    
         return CompilationState(new_ops, new_types)
 
 
