@@ -4,87 +4,92 @@ from solver_def import KnowledgeBase
 def build_mock_kb() -> KnowledgeBase:
     kb = KnowledgeBase()
 
+    # ==========================================
+    # 1. 前端降级：TOSA -> Linalg + Arith
+    # ==========================================
     p_tosa_linalg = MLIRPass("tosa-to-linalg")
-    # 规则：匹配 tosa 方言的任意 op，转为 linalg.generic
     p_tosa_linalg.add_pattern(RewritePattern(
         src_dialect="tosa", 
-        tgt_dialect="linalg", 
-        tgt_name="generic"
+        # 【修改点】：明确声明一次性生成多个方言的节点
+        generated_targets=[("linalg", "generic"), ("arith", "addf")]
     ))
     kb.register_pass(p_tosa_linalg)
 
+    # ==========================================
+    # 2. 基础计算降级：Arith -> LLVM
+    # ==========================================
+    p_arith_llvm = MLIRPass("convert-arith-to-llvm")
+
+    def is_late_stage(op, current_ops, types):
+        # 如果 IR 中还有这些高层方言，说明还会继续生成 arith，此时禁止降级 arith
+        for other_op in current_ops:
+            if other_op.dialect in ["tosa", "linalg", "scf", "cf", "affine"]:
+                return False
+        return True
+    
+    p_arith_llvm.add_pattern(RewritePattern(
+        src_dialect="arith",
+        generated_targets=[("llvm", "fadd")],
+        condition=is_late_stage
+    ))
+    kb.register_pass(p_arith_llvm)
+
+    # ==========================================
+    # 3. 内存分配：Bufferization (Tensor -> Memref)
+    # ==========================================
+    p_bufferize = MLIRPass("one-shot-bufferize")
+    p_bufferize.add_type_conversion("tensor", "memref")
+    kb.register_pass(p_bufferize)
+
+    # ==========================================
+    # 4. 结构化控制流：Linalg -> SCF (Loops)
+    # ==========================================
     p_linalg_scf = MLIRPass("convert-linalg-to-loops")
-    # 条件：只有当 IR 中出现 memref (即已经 bufferize 过) 才能将 linalg 转为 scf
     def needs_memref(op, current_ops, types):
         return MLIRType("memref") in types
         
     p_linalg_scf.add_pattern(RewritePattern(
         src_dialect="linalg", 
-        tgt_dialect="scf", 
-        tgt_name="for",
+        generated_targets=[("scf", "for"),("arith", "addi")],
         condition=needs_memref
     ))
     kb.register_pass(p_linalg_scf)
 
+    # ==========================================
+    # 5. 底层控制流：SCF -> CF -> LLVM
+    # ==========================================
     p_scf_cf = MLIRPass("convert-scf-to-cf")
-    p_scf_cf.add_pattern(RewritePattern(src_dialect="scf", tgt_dialect="cf", tgt_name="br"))
+    p_scf_cf.add_pattern(RewritePattern(
+        src_dialect="scf", 
+        generated_targets=[("cf", "br")]
+    ))
     kb.register_pass(p_scf_cf)
 
     p_cf_llvm = MLIRPass("convert-cf-to-llvm")
-    p_cf_llvm.add_pattern(RewritePattern(src_dialect="cf", tgt_dialect="llvm", tgt_name="br"))
+    p_cf_llvm.add_pattern(RewritePattern(
+        src_dialect="cf", 
+        generated_targets=[("llvm", "br")]
+    ))
     kb.register_pass(p_cf_llvm)
 
-    # 例子 1: Arith 转换到 LLVM (同名转换，arith.add 变 llvm.add)
-    # 这个规则代表：opA=arith.*, opB=llvm.*，不需要指定 tgt_name，它会自动继承 add。
-    p_arith = MLIRPass("convert-arith-to-llvm")
-    p_arith.add_pattern(RewritePattern(src_dialect="arith", tgt_dialect="llvm"))
-    kb.register_pass(p_arith)
-
-    # 例子 2: Tosa 转换到 Linalg
-    # 这个规则代表：opA=tosa.*, opB=linalg.generic (因为我们不想去细究 tosa 是怎么变成 linalg 的，统一视为 generic)
-    p_tosa = MLIRPass("tosa-to-linalg")
-    p_tosa.add_pattern(RewritePattern(src_dialect="tosa", tgt_dialect="linalg", tgt_name="generic"))
-    kb.register_pass(p_tosa)
-
-    # 例子 3: 复杂的带条件判定 (条件 C)
-    # Convert elementwise to linalg: 只有在 op 包含 tensor 类型且具有特定 trait 时触发
-    p_elem = MLIRPass("convert-elementwise-to-linalg")
-    def elem_condition(op, state_types):
-        return MLIRType("tensor") in op.operand_types and "ElementwiseMappable" in op.traits
-        
-    p_elem.add_pattern(RewritePattern(
-        src_dialect="arith", # 假设我们匹配 arith 方言
-        tgt_dialect="linalg",
-        tgt_name="generic",
-        condition=elem_condition  # 引入条件 C
-    ))
-    kb.register_pass(p_elem)
-
-    # 例子 4: 经典的类型转换 Pass (Bufferization)
-    p_bufferize = MLIRPass("one-shot-bufferize")
-    # Bufferize 不需要转换特定的 Op (粗略模型下)，而是改变全局类型 tensor -> memref
-    p_bufferize.add_type_conversion("tensor", "memref")
-    kb.register_pass(p_bufferize)
-
+    # ==========================================
+    # 6. 函数与类型的最终清理：Func/Memref -> LLVM
+    # ==========================================
     def is_final_stage(op, current_ops, types):
-        # 遍历当前环境中的所有 op
         for other_op in current_ops:
-            # 如果还有除了 func、llvm（以及最外层可能存在的 builtin）之外的方言，就不允许收尾
             if other_op.dialect not in ["func", "llvm", "builtin"]:
                 return False
         return True
 
-    p_func_to_llvm = MLIRPass("convert-func-to-llvm")
-    p_func_to_llvm.add_pattern(RewritePattern(
+    p_func_llvm = MLIRPass("convert-func-to-llvm")
+    p_func_llvm.add_pattern(RewritePattern(
         src_dialect="func", 
-        tgt_dialect="llvm", 
-        tgt_name="func",
-        condition=is_final_stage   # 【新增这里】：挂载收尾条件
+        generated_targets=[("llvm", "func")],
+        condition=is_final_stage
     ))
-    kb.register_pass(p_func_to_llvm)
+    kb.register_pass(p_func_llvm)
 
     p_memref_llvm = MLIRPass("finalize-memref-to-llvm")
-    # 消除 memref 类型，假装转为 llvm.ptr (这里用一个字符串表示底层的裸指针)
     p_memref_llvm.add_type_conversion("memref", "llvm_ptr")
     kb.register_pass(p_memref_llvm)
 

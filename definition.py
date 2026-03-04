@@ -1,4 +1,4 @@
-from typing import Optional, Set, Union, Dict, List, Callable
+from typing import Optional, Set, List, Callable, Dict, Union, Tuple
 
 class MLIRType:
     def __init__(self, name: str):
@@ -115,20 +115,19 @@ class CompilationTarget:
     
 class RewritePattern:
     """
-    表示一个从 opA 到 opB 的转换规则。
+    表示一个从 1个源Op 到 N个目标Op 的转换规则。
     """
     def __init__(self, 
                  src_dialect: str, 
-                 src_name: Optional[str] = None,   # 若为 None，则充当通配符，匹配该 Dialect 下所有 Op
-                 tgt_dialect: Optional[str] = None,# 若为 None，代表消除该 Op
-                 tgt_name: Optional[str] = None,   # 若为 None，则继承 src_op 的 name
-                 # 【修改这里】：在 Callable 签名中增加一个 Set['Operation']，用于接收 current_ops
-                 condition: Optional[Callable[['Operation', Set['Operation'], Set['MLIRType']], bool]] = None):
+                 src_name: Optional[str] = None,
+                 # 【修改】：强制统一为目标列表。如果为空列表 []，代表单纯消除该节点
+                 generated_targets: Optional[List[Tuple[str, str]]] = None,
+                 # 条件判断：接收当前 op，全局 ops，以及全局 types
+                 condition: Optional[Callable[['Operation', Set['Operation'], Set['MLIRType']], bool]] = None): 
         
         self.src_dialect = src_dialect
         self.src_name = src_name
-        self.tgt_dialect = tgt_dialect
-        self.tgt_name = tgt_name
+        self.generated_targets = generated_targets if generated_targets is not None else []
         self.condition = condition
 
     def match(self, op: 'Operation', current_ops: Set['Operation'], current_types: Set['MLIRType']) -> bool:
@@ -136,22 +135,17 @@ class RewritePattern:
             return False
         if self.src_name and op.name != self.src_name: 
             return False
-        # 传入 current_ops 进行判断
         if self.condition and not self.condition(op, current_ops, current_types): 
             return False
         return True
 
     def apply(self, op: 'Operation') -> List['Operation']:
-        """应用转换：opA -> opB"""
-        if not self.tgt_dialect:
-            return [] # 消除该节点
-        
-        # 确定新 Op 的名字（如果目标没指定，则保留原名，比如 arith.add -> llvm.add）
-        new_name = self.tgt_name if self.tgt_name else op.name
-        
-        # 继承原有的 operand_types (类型替换将在 apply_pass 统一做)
-        new_op = Operation(self.tgt_dialect, new_name, op.traits, set(op.operand_types))
-        return [new_op]
+        """应用转换：生成一组新的 Operation"""
+        results = []
+        for d_name, o_name in self.generated_targets:
+            # 新生成的 Op 暂时继承原 Op 的 traits 和 operand_types (在宏观特征集模型下足够用)
+            results.append(Operation(d_name, o_name, op.traits, set(op.operand_types)))
+        return results
 
 
 class MLIRPass:
