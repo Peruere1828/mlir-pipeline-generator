@@ -39,9 +39,16 @@ class KnowledgeBase:
         return [p for p in self.passes if p.is_applicable(state.ops, state.types)]
 
     def apply_pass(self, state: CompilationState, p: MLIRPass) -> CompilationState:
+        # 0. 先应用全局变换（例如 cse / canonicalize）
+        working_ops = set(state.ops)
+        working_types = set(state.types)
+        for transform in p.global_transforms:
+            if transform.applicable(working_ops, working_types):
+                working_ops, working_types = transform.apply(working_ops, working_types)
+
         new_ops = set()
-        new_types = set(state.types)
-        
+        new_types = set(working_types)
+
         # 1. 执行全局类型转换 (Type Conversion)
         type_changed_map = {}
         for src_t, tgt_t in p.type_conversions.items():
@@ -49,16 +56,16 @@ class KnowledgeBase:
                 new_types.remove(src_t)
                 new_types.add(tgt_t)
                 type_changed_map[src_t] = tgt_t
-                
+
         # 2. 对每个 Operation 进行 Pattern 匹配重写
-        for op in state.ops:
+        for op in working_ops:
             matched_pattern = None
             # 找到第一个命中的规则
             for pattern in p.patterns:
-                if pattern.match(op, state.ops, state.types):
+                if pattern.match(op, working_ops, working_types):
                     matched_pattern = pattern
                     break
-                    
+
             if matched_pattern:
                 # 规则触发：根据规则生成 opB
                 generated_ops = matched_pattern.apply(op)
@@ -77,7 +84,7 @@ class KnowledgeBase:
                     new_ops.add(Operation(op.dialect, op.name, op.traits, updated_types))
                 else:
                     new_ops.add(op)
-                    
+
         return CompilationState(new_ops, new_types)
 
 
