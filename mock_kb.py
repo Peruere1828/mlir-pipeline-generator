@@ -1,8 +1,43 @@
-from definition import MLIRType, Operation, MLIRPass, RewritePattern
+from definition import MLIRType, Operation, MLIRPass, RewritePattern, GlobalTransform
 from solver_def import KnowledgeBase 
 
 def build_mock_kb() -> KnowledgeBase:
     kb = KnowledgeBase()
+
+    # ==========================================
+    # 0. 全局清理 Pass：支持类 -canonicalize / -cse 的建模
+    # ==========================================
+    p_canonicalize = MLIRPass("canonicalize", cost=0.2)
+
+    def can_simplify_trivial_casts(ops, _types):
+        return any(op.dialect == "builtin" and op.name == "unrealized_conversion_cast" for op in ops)
+
+    def simplify_trivial_casts(ops, types):
+        cleaned = {op for op in ops if not (op.dialect == "builtin" and op.name == "unrealized_conversion_cast")}
+        return cleaned, set(types)
+
+    p_canonicalize.add_global_transform(GlobalTransform(
+        name="drop-unrealized-conversion-cast",
+        is_applicable=can_simplify_trivial_casts,
+        transform=simplify_trivial_casts,
+    ))
+    kb.register_pass(p_canonicalize)
+
+    p_cse = MLIRPass("cse", cost=0.2)
+
+    def can_drop_identity(ops, _types):
+        return any(op.dialect == "arith" and op.name in {"addi_identity", "muli_identity"} for op in ops)
+
+    def drop_identity(ops, types):
+        cleaned = {op for op in ops if not (op.dialect == "arith" and op.name in {"addi_identity", "muli_identity"})}
+        return cleaned, set(types)
+
+    p_cse.add_global_transform(GlobalTransform(
+        name="drop-identity-arith-ops",
+        is_applicable=can_drop_identity,
+        transform=drop_identity,
+    ))
+    kb.register_pass(p_cse)
 
     # ==========================================
     # 1. 前端降级：TOSA -> Linalg + Arith
