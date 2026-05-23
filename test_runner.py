@@ -120,12 +120,50 @@ def print_results(results, label):
 
 
 if __name__ == "__main__":
+    llvm_test = os.path.join(LLVM_ROOT, "mlir/test/Integration/Dialect")
+
     # Linalg CPU integration tests
-    linalg_dir = os.path.join(
-        LLVM_ROOT, "mlir/test/Integration/Dialect/Linalg/CPU"
-    )
+    linalg_dir = os.path.join(llvm_test, "Linalg/CPU")
     linalg_results = run_tests(
         linalg_dir,
         exclude_patterns=["ArmSME", "ArmSVE", "transform", "x86vector"],
     )
     print_results(linalg_results, "Linalg CPU Integration")
+
+    # Vector CPU integration tests
+    vector_dir = os.path.join(llvm_test, "Vector/CPU")
+    vector_results = run_tests(
+        vector_dir,
+        exclude_patterns=["ArmSME", "ArmSVE", "AMX", "x86vector", "transform", "GPU"],
+    )
+    print_results(vector_results, "Vector CPU Integration")
+
+    # Math CPU integration tests
+    math_dir = os.path.join(llvm_test, "Math/CPU")
+    math_results = run_tests(math_dir)
+    print_results(math_results, "Math CPU Integration")
+
+    # Arith CPU integration tests
+    arith_dir = os.path.join(llvm_test, "Arith/CPU")
+    arith_results = run_tests(arith_dir)
+    print_results(arith_results, "Arith CPU Integration")
+
+    # Tensor integration tests
+    tensor_dir = os.path.join(llvm_test, "Tensor")
+    tensor_results = run_tests(tensor_dir)
+    print_results(tensor_results, "Tensor Integration")
+
+    # MemRef integration tests
+    memref_dir = os.path.join(llvm_test, "MemRef")
+    memref_results = run_tests(memref_dir)
+    print_results(memref_results, "MemRef Integration")
+
+    # ControlFlow integration tests
+    cf_dir = os.path.join(llvm_test, "ControlFlow")
+    cf_results = run_tests(cf_dir)
+    print_results(cf_results, "ControlFlow Integration")
+
+    # Standard CPU integration tests
+    std_dir = os.path.join(llvm_test, "Standard/CPU")
+    std_results = run_tests(std_dir)
+    print_results(std_results, "Standard CPU Integration")
