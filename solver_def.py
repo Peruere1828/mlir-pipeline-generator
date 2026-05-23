@@ -114,8 +114,11 @@ class PipelineSearcher:
                 return [p.name for p in path]
 
             for p in self.kb.get_valid_moves(current_state):
-                # strict phase gating: only allow passes within 4 phases of current max
-                if p.phase > max_phase + 4:
+                # Phase gating: once a pass has been applied, only allow passes
+                # within 4 phases of current max. But if no pass has been applied
+                # yet (max_phase=0), allow any phase — low-phase passes may be
+                # inapplicable (e.g. memref-only input skips tensor lowering).
+                if max_phase > 0 and p.phase > max_phase + 4:
                     continue
 
                 next_state = self.kb.apply_pass(current_state, p)
