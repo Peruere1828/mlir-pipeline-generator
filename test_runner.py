@@ -167,3 +167,8 @@ if __name__ == "__main__":
     std_dir = os.path.join(llvm_test, "Standard/CPU")
     std_results = run_tests(std_dir)
     print_results(std_results, "Standard CPU Integration")
+
+    # Tosa CPU integration tests
+    tosa_dir = os.path.join(llvm_test, "Tosa/CPU")
+    tosa_results = run_tests(tosa_dir)
+    print_results(tosa_results, "Tosa CPU Integration")

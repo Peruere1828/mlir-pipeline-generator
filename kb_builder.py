@@ -27,7 +27,7 @@ from solver_def import KnowledgeBase
 
 PASS_SPEC = [
     # Phase 1 — frontend -> linalg
-    ("tosa-to-linalg",               {"tosa"}, {"linalg", "arith"}, [], 1),
+    ("tosa-to-linalg-pipeline",     {"tosa"}, {"linalg", "arith"}, [], 1),
     ("convert-elementwise-to-linalg", {"arith"}, {"linalg"}, [], 1),
     ("convert-tensor-to-linalg",     {"tensor"}, {"linalg"}, [], 1),
     ("linalg-generalize-named-ops",  {"linalg"}, {"linalg"}, [], 1),
@@ -200,9 +200,11 @@ PASS_CONDITIONS = {
 def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
     kb = KnowledgeBase()
     curated_names: set[str] = set()
+    curated_sources: set[str] = set()
 
     for name, src_d, tgt_d, type_convs, phase in PASS_SPEC:
         curated_names.add(name)
+        curated_sources.update(src_d)
         cost = phase * 0.08 + 0.05
         condition = PASS_CONDITIONS.get(name)
 
@@ -229,6 +231,11 @@ def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
         discovered = discover_passes(llvm_root)
         for p in discovered:
             if p.name not in curated_names:
+                # Demote auto-discovered passes that overlap with curated source dialects
+                auto_sources = {pat.src_dialect for pat in p.patterns}
+                if auto_sources & curated_sources:
+                    p.phase += 10
+                    p.cost = p.phase * 0.08 + 0.05
                 kb.register_pass(p)
 
     print(f"[KB] Registered {len(kb.passes)} passes ({len(curated_names)} curated)")
@@ -339,6 +346,9 @@ def _is_relevant_pass(p: ImportedPass) -> bool:
         "convert-shard", "convert-linalg-to-std",
         # Avoid generic "convert-to-llvm" (matches everything)
         "-to-llvm",
+        # Invalid shortcuts — skip intermediate dialects in the lowering chain
+        "tosa-to-arith", "linalg-to-arith", "tensor-to-arith",
+        "tosa-to-scf", "tensor-to-scf",
     ]
     name_lower = p.name.lower()
     for ex in exclude_patterns:
