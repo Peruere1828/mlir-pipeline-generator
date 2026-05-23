@@ -97,6 +97,26 @@ def _canonicalize_pass() -> MLIRPass:
         transform=lambda ops, types: (
             {op for op in ops if op.dialect != "builtin"}, set(types)),
     ))
+    p.add_global_transform(GlobalTransform(
+        name="drop-transform-ops",
+        is_applicable=lambda ops, types: any(op.dialect == "transform" for op in ops),
+        transform=lambda ops, types: (
+            {op for op in ops if op.dialect != "transform"}, set(types)),
+    ))
+    p.add_global_transform(GlobalTransform(
+        name="drop-bufferization-ops",
+        is_applicable=lambda ops, types: any(op.dialect == "bufferization" for op in ops),
+        transform=lambda ops, types: (
+            {op for op in ops if op.dialect != "bufferization"}, set(types)),
+    ))
+    p.add_global_transform(GlobalTransform(
+        name="drop-memref-dealloc",
+        is_applicable=lambda ops, types: any(
+            op.dialect == "memref" and op.name == "dealloc" for op in ops),
+        transform=lambda ops, types: (
+            {op for op in ops if not (op.dialect == "memref" and op.name == "dealloc")},
+            set(types)),
+    ))
     return p
 
 
@@ -124,10 +144,24 @@ def _reconcile_pass() -> MLIRPass:
     return p
 
 
+def _buffer_deallocation_pass() -> MLIRPass:
+    p = MLIRPass("buffer-deallocation-pipeline", cost=0.2)
+    p.add_global_transform(GlobalTransform(
+        name="drop-memref-dealloc",
+        is_applicable=lambda ops, types: any(
+            op.dialect == "memref" and op.name == "dealloc" for op in ops),
+        transform=lambda ops, types: (
+            {op for op in ops if not (op.dialect == "memref" and op.name == "dealloc")},
+            set(types)),
+    ))
+    return p
+
+
 SPECIAL_PASSES = {
     "canonicalize": _canonicalize_pass,
     "one-shot-bufferize": _one_shot_bufferize_pass,
     "reconcile-unrealized-casts": _reconcile_pass,
+    "buffer-deallocation-pipeline": _buffer_deallocation_pass,
 }
 
 
