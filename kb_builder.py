@@ -4,6 +4,7 @@ Comprehensive Knowledge Base builder for MLIR Pipeline Searcher.
 Uses a curated pass list for the linalg -> scf -> cf -> arith -> llvm lowering path.
 """
 
+from __future__ import annotations
 import os
 import re
 import json
@@ -164,8 +165,10 @@ PASS_CONDITIONS = {
 
 def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
     kb = KnowledgeBase()
+    curated_names: set[str] = set()
 
     for name, src_d, tgt_d, type_convs, phase in PASS_SPEC:
+        curated_names.add(name)
         cost = phase * 0.08 + 0.05
         condition = PASS_CONDITIONS.get(name)
 
@@ -187,8 +190,187 @@ def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
 
         kb.register_pass(p)
 
-    print(f"[KB] Registered {len(kb.passes)} curated passes")
+    # Augment with auto-discovered passes (curated ones take precedence)
+    if llvm_root:
+        discovered = discover_passes(llvm_root)
+        for p in discovered:
+            if p.name not in curated_names:
+                kb.register_pass(p)
+
+    print(f"[KB] Registered {len(kb.passes)} passes ({len(curated_names)} curated)")
     return kb
+
+
+# --- Auto-discovery of passes from TableGen files ---
+
+# Target dialects relevant to our lowering path
+RELEVANT_DIALECTS = {
+    "arith", "linalg", "scf", "affine", "cf", "func", "tosa",
+    "tensor", "memref", "bufferization", "math", "index", "ub",
+    "vector", "llvm", "builtin",
+}
+
+# Map of pass name patterns to phases (for auto-assignment)
+PHASE_MAP: Dict[str, int] = {
+    "tosa": 1,
+    "elementwise-to-linalg": 1,
+    "tensor-to-linalg": 1,
+    "linalg-generalize": 1,
+    "linalg-fold": 2,
+    "linalg-fuse": 2,
+    "linalg-morph": 2,
+    "linalg-inline": 2,
+    "linalg-block-pack": 2,
+    "depthwise-conv": 2,
+    "fold-tensor-subset": 2,
+    "one-shot-bufferize": 3,
+    "bufferization": 3,
+    "empty-tensor-to-alloc": 3,
+    "canonicalize": 4,
+    "cse": 4,
+    "drop-equivalent": 4,
+    "resolve-shaped-type": 4,
+    "resolve-ranked": 4,
+    "reify-result": 4,
+    "buffer-deallocation": 5,
+    "bufferization-to-memref": 5,
+    "normalize-memrefs": 5,
+    "fold-memref-alias": 5,
+    "linalg-to-loops": 6,
+    "linalg-to-affine": 6,
+    "linalg-to-parallel": 6,
+    "lower-affine": 6,
+    "vector-to-scf": 6,
+    "affine-data-copy": 6,
+    "affine-loop-fusion": 6,
+    "affine-super-vectorize": 6,
+    "affine-loop-coalescing": 6,
+    "affine-raise": 6,
+    "affine-simplify": 6,
+    "affine-expand-index-ops": 6,
+    "affine-fold-memref": 6,
+    "scf-to-cf": 7,
+    "lift-cf-to-scf": 7,
+    "scf-for-loop-canonicalization": 7,
+    "scf-for-loop-peeling": 7,
+    "scf-parallel-loop-tiling": 7,
+    "arith-to-llvm": 8,
+    "math-to-llvm": 8,
+    "math-to-libm": 8,
+    "math-to-funcs": 8,
+    "index-to-llvm": 8,
+    "arith-expand": 8,
+    "arith-emulate": 8,
+    "math-expand": 8,
+    "math-sincos": 8,
+    "cf-to-llvm": 9,
+    "finalize-memref": 10,
+    "memref-to-llvm": 10,
+    "vector-to-llvm": 10,
+    "expand-strided-metadata": 10,
+    "expand-realloc": 10,
+    "flatten-memref": 10,
+    "memref-emulate": 10,
+    "lower-vector-to-from": 10,
+    "func-to-llvm": 11,
+    "ub-to-llvm": 11,
+    "reconcile-unrealized-casts": 12,
+}
+
+
+def _assign_phase(pass_name: str) -> int:
+    pass_lower = pass_name.lower()
+    for pattern, phase in PHASE_MAP.items():
+        if pattern in pass_lower:
+            return phase
+    return 50  # unknown — very high phase (only tried as last resort)
+
+
+def _is_relevant_pass(p: ImportedPass) -> bool:
+    """Filter to passes on the linalg -> llvm lowering path."""
+    all_dialects = set(p.source_dialects + p.target_dialects)
+    # Must involve at least one dialect we care about
+    if not (all_dialects & RELEVANT_DIALECTS):
+        return False
+    # Exclude non-lowering passes
+    exclude_patterns = [
+        # GPU / non-CPU targets
+        "emitc", "spirv", "gpu-to", "-to-gpu", "-to-nvvm", "-to-rocdl",
+        "-to-amdgpu", "-to-amx", "-to-arm", "-to-xevm", "-to-xegpu",
+        "-to-openmp", "-to-mpi", "-to-shard", "-to-pdl", "-to-mlprogram",
+        "nvgpu-to", "nvvm-to", "arm-sme",
+        # Non-lowering / misc
+        "apfloat", "convert-shape", "convert-openacc",
+        "set-llvm-module", "map-memref-spirv", "memref-to-spirv",
+        "convert-shard", "convert-linalg-to-std",
+        # Avoid generic "convert-to-llvm" (matches everything)
+        "-to-llvm",
+    ]
+    name_lower = p.name.lower()
+    for ex in exclude_patterns:
+        if ex in name_lower:
+            return False
+    return True
+
+
+def discover_passes(llvm_root: str, use_ai: bool = False) -> List[MLIRPass]:
+    """Auto-discover passes from TableGen files in the LLVM project."""
+    from pass_importer import AIPassImporter, ImportedPass
+
+    td_search_paths = [
+        "mlir/include/mlir/Conversion/Passes.td",
+        "mlir/include/mlir/Dialect/Linalg/Passes.td",
+        "mlir/include/mlir/Dialect/SCF/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Affine/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Arith/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Math/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/MemRef/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Func/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Vector/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Bufferization/Transforms/Passes.td",
+        "mlir/include/mlir/Dialect/Tensor/Transforms/Passes.td",
+    ]
+
+    importer = AIPassImporter(model="deepseek-v4-flash")
+    discovered: List[MLIRPass] = []
+    seen = set()
+
+    for rel_path in td_search_paths:
+        full_path = os.path.join(llvm_root, rel_path)
+        if not os.path.exists(full_path):
+            continue
+
+        try:
+            imported = importer.import_from_td(full_path, use_ai=use_ai)
+        except Exception as e:
+            print(f"[Discover] Error reading {rel_path}: {e}")
+            continue
+
+        for p in imported:
+            if not p.name or p.name in seen:
+                continue
+            if not _is_relevant_pass(p):
+                continue
+
+            seen.add(p.name)
+            phase = _assign_phase(p.name)
+            cost = phase * 0.08 + 0.05
+
+            mlir_pass = MLIRPass(name=p.name, cost=cost, phase=phase)
+            for sd in p.source_dialects:
+                tgt_dialects = [t for t in p.target_dialects if t.lower() != sd]
+                targets = (
+                    [(t, "generic") for t in tgt_dialects] if tgt_dialects else []
+                )
+                if targets:
+                    mlir_pass.add_pattern(RewritePattern(
+                        src_dialect=sd,
+                        generated_targets=targets,
+                    ))
+            discovered.append(mlir_pass)
+
+    print(f"[Discover] Auto-discovered {len(discovered)} relevant passes")
+    return discovered
 
 
 def dump_kb_json(kb: KnowledgeBase, output_path: str):

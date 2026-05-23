@@ -29,7 +29,7 @@ if __name__ == "__main__":
     target.mark_type_illegal("tensor")
     target.mark_type_illegal("memref")
 
-    kb = build_comprehensive_kb()
+    kb = build_comprehensive_kb("/home/ubuntuaaa/projects/mlir/llvm-project")
 
     searcher = PipelineSearcher(kb)
     pipeline = searcher.search(start_ops, start_types, target)
