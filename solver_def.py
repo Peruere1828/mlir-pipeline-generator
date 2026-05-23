@@ -114,13 +114,17 @@ class PipelineSearcher:
                 return [p.name for p in path]
 
             for p in self.kb.get_valid_moves(current_state):
+                # strict phase gating: only allow passes within 4 phases of current max
+                if p.phase > max_phase + 4:
+                    continue
+
                 next_state = self.kb.apply_pass(current_state, p)
                 if next_state in visited:
                     continue
 
                 visited.add(next_state)
-                # heavily penalize applying a pass earlier than the max phase seen so far
-                phase_penalty = max(0, max_phase - p.phase) * 10.0
+                # penalize applying a pass earlier than the max phase seen so far
+                phase_penalty = max(0, max_phase - p.phase) * 100.0
                 new_g = g + p.cost + phase_penalty
                 new_max_phase = max(max_phase, p.phase)
                 new_f = new_g + self.heuristic(next_state, target)

@@ -127,18 +127,51 @@ SPECIAL_PASSES = {
 }
 
 
+# --- Stage-gating conditions ---
+
+def _has_tensor(ops, types):
+    return MLIRType("tensor") in types
+
+def _no_tensor(ops, types):
+    return MLIRType("tensor") not in types
+
+def _no_high_level_dialects(ops, types):
+    """arith-to-llvm: only scalar arith remains — no tensor/linalg/scf/affine/tosa ops needed first"""
+    pre_arith = {"linalg", "affine", "tensor", "tosa", "bufferization", "scf"}
+    return not any(op.dialect in pre_arith for op in ops)
+
+def _no_non_llvm_ops(ops, types):
+    return all(op.dialect in {"llvm", "func", "builtin"} for op in ops)
+
+def _has_memref(ops, types):
+    return MLIRType("memref") in types
+
+# Pass-specific condition overrides
+PASS_CONDITIONS = {
+    "convert-elementwise-to-linalg": _has_tensor,
+    "convert-tensor-to-linalg": _has_tensor,
+    "convert-linalg-to-loops": _no_tensor,
+    "convert-linalg-to-affine-loops": _no_tensor,
+    "convert-arith-to-llvm": _no_high_level_dialects,
+    "convert-func-to-llvm": _no_non_llvm_ops,
+    "finalize-memref-to-llvm": _no_tensor,
+    "expand-strided-metadata": _no_tensor,
+}
+
+
 def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
     kb = KnowledgeBase()
 
     for name, src_d, tgt_d, type_convs, phase in PASS_SPEC:
         cost = phase * 0.08 + 0.05
+        condition = PASS_CONDITIONS.get(name)
 
         if name in SPECIAL_PASSES:
             p = SPECIAL_PASSES[name]()
             p.phase = phase
             p.cost = cost
         else:
-            p = MLIRPass(name=name, cost=cost, phase=phase)
+            p = MLIRPass(name=name, cost=cost, phase=phase, condition=condition)
             for src_t, tgt_t in type_convs:
                 p.add_type_conversion(src_t, tgt_t)
             for sd in src_d:

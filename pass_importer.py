@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import List, Optional
 from urllib import request
 
@@ -12,6 +12,11 @@ class ImportedPass:
     summary: str
     source_dialects: List[str]
     target_dialects: List[str]
+    compilation_phase: Optional[str] = None  # 例如: "loop-structuring", "bufferization"
+    predecessor_phase: Optional[str] = None  # 例如: "tosa-lowering" (决定了先后顺序)
+    generated_side_effects: List[str] = field(
+        default_factory=list
+    )  # 预测是否会产生如 unrealized_conversion_cast 等中间节点
 
 
 class PassTableGenImporter:
@@ -26,12 +31,16 @@ class PassTableGenImporter:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model = model
 
-    def import_from_file(self, file_path: str, use_ai: bool = False) -> List[ImportedPass]:
+    def import_from_file(
+        self, file_path: str, use_ai: bool = False
+    ) -> List[ImportedPass]:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
         return self.import_from_content(content, use_ai=use_ai)
 
-    def import_from_content(self, content: str, use_ai: bool = False) -> List[ImportedPass]:
+    def import_from_content(
+        self, content: str, use_ai: bool = False
+    ) -> List[ImportedPass]:
         if use_ai and self.api_key:
             ai_result = self._extract_with_ai(content)
             if ai_result:
@@ -52,7 +61,12 @@ class PassTableGenImporter:
             pass_name = m.group(2)
             src, tgt = self._infer_dialects(pass_name, summary)
             imports.append(
-                ImportedPass(name=pass_name, summary=summary, source_dialects=src, target_dialects=tgt)
+                ImportedPass(
+                    name=pass_name,
+                    summary=summary,
+                    source_dialects=src,
+                    target_dialects=tgt,
+                )
             )
         return imports
 
