@@ -97,14 +97,15 @@ class PipelineSearcher:
 
     def search(self, start_ops: Set[Operation], start_types: Set[MLIRType], target: CompilationTarget) -> Optional[List[str]]:
         start_state = CompilationState(start_ops, start_types)
-        queue = [(self.heuristic(start_state, target), 0.0, start_state, [])]
+        # queue entries: (f, g, state, path, max_phase)
+        queue = [(self.heuristic(start_state, target), 0.0, start_state, [], 0)]
         visited = {start_state}
 
         print(f"[Solver] Initial State: {start_state}")
-        
+
         steps = 0
         while queue:
-            f, g, current_state, path = heapq.heappop(queue)
+            f, g, current_state, path, max_phase = heapq.heappop(queue)
             steps += 1
 
             if current_state.is_solved(target):
@@ -116,11 +117,14 @@ class PipelineSearcher:
                 next_state = self.kb.apply_pass(current_state, p)
                 if next_state in visited:
                     continue
-                
+
                 visited.add(next_state)
-                new_g = g + p.cost
+                # heavily penalize applying a pass earlier than the max phase seen so far
+                phase_penalty = max(0, max_phase - p.phase) * 10.0
+                new_g = g + p.cost + phase_penalty
+                new_max_phase = max(max_phase, p.phase)
                 new_f = new_g + self.heuristic(next_state, target)
-                heapq.heappush(queue, (new_f, new_g, next_state, path + [p]))
-        
+                heapq.heappush(queue, (new_f, new_g, next_state, path + [p], new_max_phase))
+
         print("[Solver] No solution found.")
         return None

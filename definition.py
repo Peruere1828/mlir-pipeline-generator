@@ -1,5 +1,6 @@
 from typing import Optional, Set, List, Callable, Dict, Union, Tuple
 
+
 class MLIRType:
     def __init__(self, name: str):
         self.name = name  # e.g., 'tensor', 'memref', 'vector'
@@ -19,9 +20,14 @@ class Operation:
     表示一个 MLIR Operation 类型。
     例如: 对于 'linalg.generic', dialect='linalg', name='generic'
     """
-    def __init__(self, dialect: str, name: str,
-                 traits: Optional[Set[str]] = None,
-                 operand_types: Optional[Set[MLIRType]] = None):
+
+    def __init__(
+        self,
+        dialect: str,
+        name: str,
+        traits: Optional[Set[str]] = None,
+        operand_types: Optional[Set[MLIRType]] = None,
+    ):
         self.dialect = dialect
         self.name = name  # 仅保留后缀，例如 'matmul'
         self.traits = traits if traits else set()
@@ -41,9 +47,11 @@ class Operation:
         """现在判断两个 Op 是否相同，要求dialect、opname、optypes相同"""
         if not isinstance(other, Operation):
             return False
-        return (self.dialect == other.dialect and
-                self.name == other.name and
-                self.operand_types == other.operand_types)
+        return (
+            self.dialect == other.dialect
+            and self.name == other.name
+            and self.operand_types == other.operand_types
+        )
 
     def __hash__(self):
         """
@@ -63,6 +71,7 @@ class CompilationTarget:
     3. 如果 mark_op_illegal(op): 仅该 Op 变为 Illegal (覆盖默认)。
     4. (未来扩展) mark_op_legal(op): 可以覆盖 Dialect 的 illegal 设置 (Specific overrides generic)。
     """
+
     def __init__(self):
         self._illegal_dialects: Set[str] = set()
         self._illegal_ops: Set[Operation] = set()
@@ -120,18 +129,30 @@ class RewritePattern:
     表示一个从 1个源Op 到 N个目标Op 的转换规则。
     src_dialect 支持通配符 "*"，用于表达全局应用 pass（例如 canonicalize/cse）。
     """
-    def __init__(self,
-                 src_dialect: str,
-                 src_name: Optional[str] = None,
-                 generated_targets: Optional[List[Tuple[str, str]]] = None,
-                 condition: Optional[Callable[['Operation', Set['Operation'], Set['MLIRType']], bool]] = None):
+
+    def __init__(
+        self,
+        src_dialect: str,
+        src_name: Optional[str] = None,
+        generated_targets: Optional[List[Tuple[str, str]]] = None,
+        condition: Optional[
+            Callable[["Operation", Set["Operation"], Set["MLIRType"]], bool]
+        ] = None,
+    ):
 
         self.src_dialect = src_dialect
         self.src_name = src_name
-        self.generated_targets = generated_targets if generated_targets is not None else []
+        self.generated_targets = (
+            generated_targets if generated_targets is not None else []
+        )
         self.condition = condition
 
-    def match(self, op: 'Operation', current_ops: Set['Operation'], current_types: Set['MLIRType']) -> bool:
+    def match(
+        self,
+        op: "Operation",
+        current_ops: Set["Operation"],
+        current_types: Set["MLIRType"],
+    ) -> bool:
         if self.src_dialect != "*" and op.dialect != self.src_dialect:
             return False
         if self.src_name and op.name != self.src_name:
@@ -140,7 +161,7 @@ class RewritePattern:
             return False
         return True
 
-    def apply(self, op: 'Operation') -> List['Operation']:
+    def apply(self, op: "Operation") -> List["Operation"]:
         """应用转换：生成一组新的 Operation"""
         results = []
         for d_name, o_name in self.generated_targets:
@@ -155,17 +176,22 @@ class GlobalTransform:
     def __init__(
         self,
         name: str,
-        is_applicable: Callable[[Set['Operation'], Set['MLIRType']], bool],
-        transform: Callable[[Set['Operation'], Set['MLIRType']], Tuple[Set['Operation'], Set['MLIRType']]],
+        is_applicable: Callable[[Set["Operation"], Set["MLIRType"]], bool],
+        transform: Callable[
+            [Set["Operation"], Set["MLIRType"]],
+            Tuple[Set["Operation"], Set["MLIRType"]],
+        ],
     ):
         self.name = name
         self._is_applicable = is_applicable
         self._transform = transform
 
-    def applicable(self, ops: Set['Operation'], types: Set['MLIRType']) -> bool:
+    def applicable(self, ops: Set["Operation"], types: Set["MLIRType"]) -> bool:
         return self._is_applicable(ops, types)
 
-    def apply(self, ops: Set['Operation'], types: Set['MLIRType']) -> Tuple[Set['Operation'], Set['MLIRType']]:
+    def apply(
+        self, ops: Set["Operation"], types: Set["MLIRType"]
+    ) -> Tuple[Set["Operation"], Set["MLIRType"]]:
         return self._transform(ops, types)
 
 
@@ -173,9 +199,18 @@ class MLIRPass:
     """
     一个 Pass 本质上就是一组 Pattern 规则的集合，外加一些全局的类型转换策略。
     """
-    def __init__(self, name: str, cost: float = 1.0):
+
+    def __init__(
+        self,
+        name: str,
+        cost: float = 1.0,
+        phase: int = 5,
+        condition: Optional[Callable[[Set["Operation"], Set["MLIRType"]], bool]] = None,
+    ):
         self.name = name
         self.cost = cost
+        self.phase = phase
+        self.condition = condition
 
         # 存放 opA -> opB 的规则集
         self.patterns: List[RewritePattern] = []
@@ -189,7 +224,9 @@ class MLIRPass:
     def add_pattern(self, pattern: RewritePattern):
         self.patterns.append(pattern)
 
-    def add_type_conversion(self, src_type: Union[str, MLIRType], tgt_type: Union[str, MLIRType]):
+    def add_type_conversion(
+        self, src_type: Union[str, MLIRType], tgt_type: Union[str, MLIRType]
+    ):
         if isinstance(src_type, str):
             src_type = MLIRType(src_type)
         if isinstance(tgt_type, str):
@@ -199,10 +236,12 @@ class MLIRPass:
     def add_global_transform(self, transform: GlobalTransform):
         self.global_transforms.append(transform)
 
-    def is_applicable(self, ops: Set['Operation'], types: Set['MLIRType']) -> bool:
+    def is_applicable(self, ops: Set["Operation"], types: Set["MLIRType"]) -> bool:
         """
         只要有任何一个全局类型需要被转换，或者有任何一个 Op 能命中规则，就可以应用该 Pass。
         """
+        if self.condition and not self.condition(ops, types):
+            return False
         for transform in self.global_transforms:
             if transform.applicable(ops, types):
                 return True
