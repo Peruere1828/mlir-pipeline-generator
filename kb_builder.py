@@ -46,10 +46,11 @@ PASS_SPEC = [
     ("buffer-deallocation-pipeline",    {"memref"}, {"memref"}, [], 5),
     ("convert-bufferization-to-memref", {"bufferization"}, {"memref"}, [], 5),
 
-    # Phase 6 — linalg/affine -> scf/arith
+    # Phase 6 — linalg/affine/vector -> scf/arith
     ("convert-linalg-to-loops",  {"linalg"}, {"scf", "arith", "math", "func"}, [], 6),
     ("convert-linalg-to-affine-loops", {"linalg"}, {"affine"}, [], 6),
     ("lower-affine",             {"affine"}, {"scf", "arith", "math", "func"}, [], 6),
+    ("convert-vector-to-scf",    {"vector"}, {"scf", "arith", "memref", "func"}, [], 6),
 
     # Phase 7 — scf -> cf
     ("convert-scf-to-cf", {"scf"}, {"cf"}, [], 7),
@@ -57,14 +58,16 @@ PASS_SPEC = [
     # Phase 8 — arith/math/index -> llvm
     ("convert-arith-to-llvm", {"arith"}, {"llvm"}, [], 8),
     ("convert-math-to-llvm",  {"math"}, {"llvm"}, [], 8),
+    ("convert-math-to-libm",  {"math"}, {"llvm"}, [], 8),
     ("convert-index-to-llvm", {"index"}, {"llvm"}, [], 8),
 
     # Phase 9 — cf -> llvm
     ("convert-cf-to-llvm",  {"cf"}, {"llvm"}, [], 9),
 
-    # Phase 10 — memref finalization
+    # Phase 10 — memref/vector finalization
     ("finalize-memref-to-llvm", {"memref"}, {"llvm"}, [("memref","llvm_ptr")], 10),
     ("expand-strided-metadata", {"memref"}, {"memref"}, [], 10),
+    ("convert-vector-to-llvm",  {"vector"}, {"llvm"}, [], 10),
 
     # Phase 11 — func/ub -> llvm
     ("convert-func-to-llvm", {"func"}, {"llvm"}, [], 11),
