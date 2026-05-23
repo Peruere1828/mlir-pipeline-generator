@@ -89,22 +89,43 @@ class KnowledgeBase:
 
 
 class PipelineSearcher:
+    # Dialect lowering complexity weights for heuristic
+    DIALECT_WEIGHTS = {
+        "tosa": 5.0, "linalg": 4.0, "transform": 4.0,
+        "vector": 3.0, "affine": 3.0, "bufferization": 3.0,
+        "tensor": 2.5, "scf": 2.0, "math": 2.0,
+        "memref": 1.5, "arith": 1.0, "cf": 1.0,
+        "func": 0.8, "index": 0.5, "ub": 0.5, "builtin": 0.3,
+    }
+
     def __init__(self, kb: KnowledgeBase):
         self.kb = kb
 
     def heuristic(self, state: CompilationState, target: CompilationTarget) -> float:
-        return float(state.get_illegal_items(target))
+        h = 0.0
+        for op in state.ops:
+            if not target.is_legal_op(op):
+                h += self.DIALECT_WEIGHTS.get(op.dialect, 3.0)
+        for t in state.types:
+            if not target.is_legal_type(t):
+                h += 2.0
+        return h
 
     def search(self, start_ops: Set[Operation], start_types: Set[MLIRType], target: CompilationTarget) -> Optional[List[str]]:
         start_state = CompilationState(start_ops, start_types)
-        # queue entries: (f, g, state, path, max_phase)
-        queue = [(self.heuristic(start_state, target), 0.0, start_state, [], 0)]
+        queue: list = [(self.heuristic(start_state, target), 0.0, start_state, [], 0)]
         visited = {start_state}
 
         print(f"[Solver] Initial State: {start_state}")
 
         steps = 0
+        max_queue_size = 50000
         while queue:
+            if len(queue) > max_queue_size:
+                queue.sort(key=lambda x: x[0])
+                queue = queue[:max_queue_size // 2]
+                heapq.heapify(queue)
+
             f, g, current_state, path, max_phase = heapq.heappop(queue)
             steps += 1
 
@@ -114,10 +135,6 @@ class PipelineSearcher:
                 return [p.name for p in path]
 
             for p in self.kb.get_valid_moves(current_state):
-                # Phase gating: once a pass has been applied, only allow passes
-                # within 4 phases of current max. But if no pass has been applied
-                # yet (max_phase=0), allow any phase — low-phase passes may be
-                # inapplicable (e.g. memref-only input skips tensor lowering).
                 if max_phase > 0 and p.phase > max_phase + 4:
                     continue
 
@@ -126,7 +143,6 @@ class PipelineSearcher:
                     continue
 
                 visited.add(next_state)
-                # penalize applying a pass earlier than the max phase seen so far
                 phase_penalty = max(0, max_phase - p.phase) * 100.0
                 new_g = g + p.cost + phase_penalty
                 new_max_phase = max(max_phase, p.phase)
