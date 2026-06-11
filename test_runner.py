@@ -1,18 +1,20 @@
 """
 Test harness — runs the pipeline searcher against MLIR integration test files
-and validates output with mlir-opt.
+and validates output with mlir-opt + mlir-translate (strict LLVM IR check).
 """
 import subprocess
 import sys
 import os
+import re
 from pathlib import Path
 
 from mlir_parser import MLIRParser
 from kb_builder import build_comprehensive_kb
 from solver_def import PipelineSearcher, CompilationTarget
 
-MLIR_OPT = "/home/ubuntuaaa/projects/mlir/llvm-project/build/bin/mlir-opt"
-LLVM_ROOT = "/home/ubuntuaaa/projects/mlir/llvm-project"
+MLIR_OPT = "/home/ubuntuaaa/projects/llvm-project/build/bin/mlir-opt"
+MLIR_TRANSLATE = "/home/ubuntuaaa/projects/llvm-project/build/bin/mlir-translate"
+LLVM_ROOT = "/home/ubuntuaaa/projects/llvm-project"
 
 # Dialects/types we want to lower away
 ILLEGAL_DIALECTS = [
@@ -48,10 +50,10 @@ def find_pipeline(mlir_path, kb, target, parser):
     return list(result), None
 
 
-def run_mlir_opt(mlir_path, pipeline):
-    """Run mlir-opt with the generated pipeline. Returns (success, output)."""
+def run_pipeline(mlir_path, pipeline):
+    """Run mlir-opt with the generated pipeline. Returns (success, output_str, error_str)."""
     if not pipeline:
-        return False, "empty pipeline"
+        return False, "", "empty pipeline"
 
     pass_pipeline = ",".join(pipeline)
     cmd = [MLIR_OPT, mlir_path, f"--pass-pipeline=builtin.module({pass_pipeline})"]
@@ -61,16 +63,42 @@ def run_mlir_opt(mlir_path, pipeline):
             cmd, capture_output=True, text=True, timeout=30,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            return True, proc.stdout[:500]
-        return False, proc.stderr[:300] or "(no output)"
+            return True, proc.stdout, ""
+        return False, "", proc.stderr[:300] or "(no output)"
     except subprocess.TimeoutExpired:
-        return False, "timeout"
+        return False, "", "timeout"
     except FileNotFoundError:
-        return False, f"mlir-opt not found at {MLIR_OPT}"
+        return False, "", f"mlir-opt not found at {MLIR_OPT}"
+
+
+def verify_llvm_ir(mlir_output):
+    """
+    Use mlir-translate to verify the output is valid LLVM IR.
+    Returns (is_clean, detail).
+    """
+    if not os.path.exists(MLIR_TRANSLATE):
+        return None, "mlir-translate not found"
+
+    try:
+        proc = subprocess.run(
+            [MLIR_TRANSLATE, "-mlir-to-llvmir"],
+            input=mlir_output, capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            inst_count = len(re.findall(
+                r'\b(add|sub|mul|call|ret|br|load|store|alloca|'
+                r'getelementptr|icmp|fcmp|phi|select|bitcast)\b',
+                proc.stdout))
+            return True, f"valid LLVM IR ({inst_count} instructions)"
+        return False, f"mlir-translate failed: {proc.stderr[:120]}"
+    except subprocess.TimeoutExpired:
+        return False, "mlir-translate timeout"
+    except FileNotFoundError:
+        return None, "mlir-translate not found"
 
 
 def run_tests(test_dir, exclude_patterns=None):
-    """Run solver against all .mlir files in test_dir and validate with mlir-opt."""
+    """Run solver against all .mlir files in test_dir and validate with mlir-opt + mlir-translate."""
     if exclude_patterns is None:
         exclude_patterns = []
 
@@ -90,14 +118,20 @@ def run_tests(test_dir, exclude_patterns=None):
 
         pipeline, err = find_pipeline(str(tf), kb, target, parser)
         if err:
-            results["fail"].append((str(rel), err))
+            results["fail"].append((str(rel), f"solver: {err}"))
             continue
 
-        ok, detail = run_mlir_opt(str(tf), pipeline)
-        if ok:
-            results["pass"].append((str(rel), " -> ".join(pipeline)))
+        ok, output, detail = run_pipeline(str(tf), pipeline)
+        if not ok:
+            results["fail"].append((str(rel), f"mlir-opt: {detail[:120]}"))
+            continue
+
+        # Strict check: verify with mlir-translate
+        llvm_ok, llvm_msg = verify_llvm_ir(output)
+        if llvm_ok:
+            results["pass"].append((str(rel), " -> ".join(pipeline) + f"  [{llvm_msg}]"))
         else:
-            results["fail"].append((str(rel), f"mlir-opt rejected: {detail[:120]}"))
+            results["fail"].append((str(rel), llvm_msg or "mlir-translate not available"))
 
     return results
 
@@ -108,8 +142,9 @@ def print_results(results, label):
         print(f"\n[{label}] No tests")
         return
 
+    rate = 100 * len(results["pass"]) / total if total > 0 else 0
     print(f"\n=== {label} ===")
-    print(f"PASS: {len(results['pass'])}/{total} ({100*len(results['pass'])/total:.0f}%)")
+    print(f"PASS: {len(results['pass'])}/{total} ({rate:.0f}%)")
     for path, pipeline in results["pass"]:
         print(f"  [PASS] {path}")
         print(f"         {pipeline}")

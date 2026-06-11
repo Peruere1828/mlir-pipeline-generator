@@ -60,30 +60,28 @@ class KnowledgeBase:
         # 2. 对每个 Operation 进行 Pattern 匹配重写
         for op in working_ops:
             matched_pattern = None
-            # 找到第一个命中的规则
             for pattern in p.patterns:
                 if pattern.match(op, working_ops, working_types):
                     matched_pattern = pattern
                     break
 
             if matched_pattern:
-                # 规则触发：根据规则生成 opB
                 generated_ops = matched_pattern.apply(op)
                 for gen_op in generated_ops:
-                    # 如果刚才发生了类型转换，需要把生成的 Op 的类型也同步更新
-                    # 例如把 arith.add(tensor) 变成了 llvm.add(memref)
                     if type_changed_map:
                         updated_types = {type_changed_map.get(t, t) for t in gen_op.operand_types}
                         gen_op.operand_types = updated_types
                     new_ops.add(gen_op)
             else:
-                # 没有规则触发该 Op，原样保留
-                # 但要注意：如果全局类型改变了，且该未被重写的 Op 使用了旧类型，我们需要给它换上新类型
                 if type_changed_map and any(t in type_changed_map for t in op.operand_types):
                     updated_types = {type_changed_map.get(t, t) for t in op.operand_types}
                     new_ops.add(Operation(op.dialect, op.name, op.traits, updated_types))
                 else:
                     new_ops.add(op)
+
+        # 3. 注入 Pass 级别的副作用 op（如 unrealized_conversion_cast）
+        for d_name, o_name in p.side_effect_ops:
+            new_ops.add(Operation(d_name, o_name))
 
         return CompilationState(new_ops, new_types)
 

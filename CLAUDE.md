@@ -24,7 +24,7 @@ python3 *
 git 
 等等。
 
-llvm-project的根目录在/home/ubuntuaaa/projects/mlir/llvm-project，版本22.1.x，已经build过了
+llvm-project的根目录在/home/ubuntuaaa/projects/llvm-project，版本22.1.x，已经build过了
 环境变量里虽然也有mlir-opt、llvm-lit等，但是它是20.1.8版本的。注意与上述区分。
 
 每当完成一个阶段的开发，使用 `git add *` 和 `git commit -m *`命令提交结果。这里*是通配符。

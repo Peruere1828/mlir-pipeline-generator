@@ -83,38 +83,24 @@ PASS_SPEC = [
 
 def _canonicalize_pass() -> MLIRPass:
     p = MLIRPass("canonicalize", cost=0.1)
-    p.add_global_transform(GlobalTransform(
-        name="drop-unrealized-conversion-cast",
-        is_applicable=lambda ops, types: any(
-            op.dialect == "builtin" and "cast" in op.name for op in ops),
-        transform=lambda ops, types: (
-            {op for op in ops if not (op.dialect == "builtin" and "cast" in op.name)},
-            set(types)),
-    ))
-    p.add_global_transform(GlobalTransform(
-        name="drop-builtin-ops",
-        is_applicable=lambda ops, types: any(op.dialect == "builtin" for op in ops),
-        transform=lambda ops, types: (
-            {op for op in ops if op.dialect != "builtin"}, set(types)),
-    ))
+    # NOTE: canonicalize only cleans up transform dialect scaffolding and debug ops.
+    # It does NOT remove unrealized_conversion_cast ops (reconcile-unrealized-casts does),
+    # bufferization ops (convert-bufferization-to-memref does), or memref ops
+    # (finalize-memref-to-llvm does). This prevents the solver from taking shortcuts
+    # that don't work in real mlir-opt.
     p.add_global_transform(GlobalTransform(
         name="drop-transform-ops",
         is_applicable=lambda ops, types: any(op.dialect == "transform" for op in ops),
         transform=lambda ops, types: (
             {op for op in ops if op.dialect != "transform"}, set(types)),
     ))
+    # Debug/testing ops that don't lower to LLVM — drop in the abstract model
     p.add_global_transform(GlobalTransform(
-        name="drop-bufferization-ops",
-        is_applicable=lambda ops, types: any(op.dialect == "bufferization" for op in ops),
-        transform=lambda ops, types: (
-            {op for op in ops if op.dialect != "bufferization"}, set(types)),
-    ))
-    p.add_global_transform(GlobalTransform(
-        name="drop-memref-dealloc",
+        name="drop-debug-vector-print",
         is_applicable=lambda ops, types: any(
-            op.dialect == "memref" and op.name == "dealloc" for op in ops),
+            op.dialect == "vector" and op.name == "print" for op in ops),
         transform=lambda ops, types: (
-            {op for op in ops if not (op.dialect == "memref" and op.name == "dealloc")},
+            {op for op in ops if not (op.dialect == "vector" and op.name == "print")},
             set(types)),
     ))
     return p
@@ -126,6 +112,14 @@ def _one_shot_bufferize_pass() -> MLIRPass:
     p.add_pattern(RewritePattern(
         src_dialect="tensor",
         generated_targets=[("memref", "generic")],
+    ))
+    p.add_pattern(RewritePattern(
+        src_dialect="linalg",
+        generated_targets=[("linalg", "generic")],
+    ))
+    p.add_pattern(RewritePattern(
+        src_dialect="scf",
+        generated_targets=[("scf", "generic")],
     ))
     return p
 
@@ -197,6 +191,38 @@ PASS_CONDITIONS = {
 }
 
 
+# --- Passes that generate unrealized_conversion_cast at dialect boundaries ---
+# Only the passes that cross major type-system boundaries (involving memref)
+# generate casts that need explicit reconcile-unrealized-casts cleanup.
+CONVERSION_CAST_PRODUCERS = {
+    "finalize-memref-to-llvm",
+    "convert-func-to-llvm",
+}
+
+# --- Passes that produce bufferization dialect intermediate ops ---
+BUFFERIZATION_SIDE_EFFECTS = {
+    "one-shot-bufferize": [("bufferization", "to_tensor"), ("bufferization", "to_memref")],
+}
+
+# --- Passes that generate index dialect ops as side effects ---
+# Loop lowering passes produce index operations (loop counters, bounds) that
+# need explicit convert-index-to-llvm to be fully lowered.
+INDEX_PRODUCERS = {
+    "convert-linalg-to-loops",
+    "convert-linalg-to-affine-loops",
+    "lower-affine",
+    "convert-scf-to-cf",
+    "convert-vector-to-scf",
+}
+
+# --- Passes that generate ub.poison as side effect ---
+# Vector-to-llvm conversion generates ub.poison for undefined values.
+UB_PRODUCERS = {
+    "convert-vector-to-llvm",
+    "convert-vector-to-scf",
+}
+
+
 def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
     kb = KnowledgeBase()
     curated_names: set[str] = set()
@@ -223,6 +249,22 @@ def build_comprehensive_kb(llvm_root: str = "") -> KnowledgeBase:
                         src_dialect=sd,
                         generated_targets=targets,
                     ))
+
+        # Inject side_effect_ops for conversion passes that produce unrealized casts
+        if name in CONVERSION_CAST_PRODUCERS:
+            p.side_effect_ops.append(("builtin", "unrealized_conversion_cast"))
+
+        # Inject bufferization side effects
+        if name in BUFFERIZATION_SIDE_EFFECTS:
+            p.side_effect_ops.extend(BUFFERIZATION_SIDE_EFFECTS[name])
+
+        # Inject index dialect ops for loop-lowering passes
+        if name in INDEX_PRODUCERS:
+            p.side_effect_ops.append(("index", "generic"))
+
+        # Inject ub dialect ops for vector lowering passes
+        if name in UB_PRODUCERS:
+            p.side_effect_ops.append(("ub", "poison"))
 
         kb.register_pass(p)
 

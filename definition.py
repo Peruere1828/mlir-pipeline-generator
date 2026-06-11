@@ -128,6 +128,9 @@ class RewritePattern:
     """
     表示一个从 1个源Op 到 N个目标Op 的转换规则。
     src_dialect 支持通配符 "*"，用于表达全局应用 pass（例如 canonicalize/cse）。
+
+    side_effect_ops: 不替换源 op，而是额外生成到 state 中的 op。
+    用于建模 unrealized_conversion_cast 等转换产物。
     """
 
     def __init__(
@@ -135,6 +138,7 @@ class RewritePattern:
         src_dialect: str,
         src_name: Optional[str] = None,
         generated_targets: Optional[List[Tuple[str, str]]] = None,
+        side_effect_ops: Optional[List[Tuple[str, str]]] = None,
         condition: Optional[
             Callable[["Operation", Set["Operation"], Set["MLIRType"]], bool]
         ] = None,
@@ -144,6 +148,9 @@ class RewritePattern:
         self.src_name = src_name
         self.generated_targets = (
             generated_targets if generated_targets is not None else []
+        )
+        self.side_effect_ops: List[Tuple[str, str]] = (
+            side_effect_ops if side_effect_ops is not None else []
         )
         self.condition = condition
 
@@ -162,12 +169,17 @@ class RewritePattern:
         return True
 
     def apply(self, op: "Operation") -> List["Operation"]:
-        """应用转换：生成一组新的 Operation"""
+        """应用转换：生成一组新的 Operation（含 side_effect_ops）"""
         results = []
         for d_name, o_name in self.generated_targets:
-            # 新生成的 Op 暂时继承原 Op 的 traits 和 operand_types (在宏观特征集模型下足够用)
             results.append(Operation(d_name, o_name, op.traits, set(op.operand_types)))
+        for d_name, o_name in self.side_effect_ops:
+            results.append(Operation(d_name, o_name))
         return results
+
+    def get_side_effect_ops(self) -> List["Operation"]:
+        """返回该 pattern 独立产生的副作用 op（不替代源 op，额外存在）"""
+        return [Operation(d, n) for d, n in self.side_effect_ops]
 
 
 class GlobalTransform:
@@ -220,6 +232,10 @@ class MLIRPass:
 
         # 存放全局转换 (例如 cse / canonicalize 这样的全局应用 pass)
         self.global_transforms: List[GlobalTransform] = []
+
+        # Pass 级别的副作用 op：应用此 pass 后总是额外生成的 op
+        # 用于建模 unrealized_conversion_cast 等中间产物
+        self.side_effect_ops: List[Tuple[str, str]] = []
 
     def add_pattern(self, pattern: RewritePattern):
         self.patterns.append(pattern)
